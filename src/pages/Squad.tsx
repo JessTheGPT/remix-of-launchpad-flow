@@ -36,7 +36,7 @@ const Squad = () => {
   const [generating, setGenerating] = useState(false);
   const [generatingAgent, setGeneratingAgent] = useState<string | undefined>();
   const [flowExpanded, setFlowExpanded] = useState(true);
-  const [centerView, setCenterView] = useState<{ type: 'activity' | 'document' | 'debates'; id?: string }>({ type: 'activity' });
+  const [centerView, setCenterView] = useState<{ type: 'activity' | 'document' | 'agent_thread'; id?: string }>({ type: 'activity' });
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [sidebarTab, setSidebarTab] = useState<'chat' | 'docs' | 'debates'>('chat');
   const [completedAgents, setCompletedAgents] = useState<Set<string>>(new Set());
