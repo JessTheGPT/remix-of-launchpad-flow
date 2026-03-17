@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { streamChat } from '@/lib/streamChat';
 import { STARTUP_AGENTS } from '@/lib/startupAgents';
+import { SQUAD_AGENTS } from '@/lib/squadAgents';
 
 interface Message {
   role: 'user' | 'assistant';
