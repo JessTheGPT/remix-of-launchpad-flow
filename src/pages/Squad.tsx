@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Zap, ArrowRight, Loader2, ChevronDown, ChevronUp, Plus, Sparkles, MessageSquare, FileText, ArrowLeft, LogOut } from 'lucide-react';
+import { Zap, ArrowRight, Loader2, ChevronDown, ChevronUp, Plus, Sparkles, MessageSquare, FileText, ArrowLeft, LogOut, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -7,6 +7,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import SquadPipelineFlow from '@/components/squad/SquadPipelineFlow';
+import DebateCanvas from '@/components/squad/DebateCanvas';
+import DebateFlowVisualization from '@/components/squad/DebateFlowVisualization';
 import AgentChat from '@/components/startup/AgentChat';
 import DocumentPanel, { IdeaDocument } from '@/components/startup/DocumentPanel';
 import CenterCanvas from '@/components/startup/CenterCanvas';
@@ -14,6 +16,7 @@ import IdeaSelector, { StartupIdea } from '@/components/startup/IdeaSelector';
 import AgentActivityFeed from '@/components/startup/AgentActivityFeed';
 import DocumentViewer from '@/components/startup/DocumentViewer';
 import { SQUAD_AGENTS } from '@/lib/squadAgents';
+import { DEBATE_PAIRS } from '@/lib/debateConfig';
 import { streamChat } from '@/lib/streamChat';
 import type { ActivityEvent } from '@/pages/Startup';
 
@@ -33,10 +36,12 @@ const Squad = () => {
   const [generating, setGenerating] = useState(false);
   const [generatingAgent, setGeneratingAgent] = useState<string | undefined>();
   const [flowExpanded, setFlowExpanded] = useState(true);
-  const [centerView, setCenterView] = useState<{ type: 'activity' | 'document'; id?: string }>({ type: 'activity' });
+  const [centerView, setCenterView] = useState<{ type: 'activity' | 'document' | 'agent_thread'; id?: string }>({ type: 'activity' });
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
-  const [sidebarTab, setSidebarTab] = useState<'chat' | 'docs'>('chat');
+  const [sidebarTab, setSidebarTab] = useState<'chat' | 'docs' | 'debates'>('chat');
   const [completedAgents, setCompletedAgents] = useState<Set<string>>(new Set());
+  const [completedDebates, setCompletedDebates] = useState<Set<string>>(new Set());
+  const [debateRedLines, setDebateRedLines] = useState<Record<string, boolean>>({});
 
   useEffect(() => { loadIdeas(); }, []);
 
@@ -47,7 +52,6 @@ const Squad = () => {
       .select('*')
       .eq('current_phase', 'squad')
       .order('created_at', { ascending: false });
-    // Also load ideas without squad phase for backwards compat
     const { data: data2 } = await supabase
       .from('startup_ideas')
       .select('*')
@@ -78,7 +82,6 @@ const Squad = () => {
     const docs = (docResult.data as IdeaDocument[]) || [];
     setDocuments(docs);
 
-    // Determine completed agents from docs
     const completed = new Set<string>();
     docs.forEach(d => {
       if (d.status === 'complete' || d.status === 'reviewed') {
@@ -87,7 +90,6 @@ const Squad = () => {
     });
     setCompletedAgents(completed);
 
-    // Determine current step
     const lastCompletedIdx = SQUAD_AGENTS.reduce((max, agent, idx) => {
       return completed.has(agent.id) ? Math.max(max, idx) : max;
     }, -1);
@@ -111,6 +113,8 @@ const Squad = () => {
     setActiveAgent(SQUAD_AGENTS[0].id);
     setCurrentStep(0);
     setCompletedAgents(new Set());
+    setCompletedDebates(new Set());
+    setDebateRedLines({});
     setActivityFeed([]);
     setCenterView({ type: 'activity' });
     setSidebarTab('chat');
@@ -132,7 +136,6 @@ const Squad = () => {
     const currentAgentIdx = SQUAD_AGENTS.findIndex(a => a.id === activeAgent);
     if (currentAgentIdx < 0) return;
 
-    // Save current agent messages
     const msgs = agentMessages[activeAgent] || [];
     if (msgs.length > 0) {
       await supabase.from('idea_messages').delete()
@@ -149,7 +152,6 @@ const Squad = () => {
       await supabase.from('idea_messages').insert(msgInserts);
     }
 
-    // Save a document from the chat if there's assistant content
     const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant');
     const currentAgentDef = SQUAD_AGENTS[currentAgentIdx];
     if (lastAssistant) {
@@ -177,15 +179,27 @@ const Squad = () => {
       }
     }
 
-    // Mark completed
     setCompletedAgents(prev => new Set([...prev, activeAgent]));
 
-    // Move to next agent
+    // Check if there's a debate to trigger
+    const debatesAfterAgent = DEBATE_PAIRS.filter(d => d.afterAgent === activeAgent && !completedDebates.has(d.id));
+    if (debatesAfterAgent.length > 0) {
+      addActivity({
+        type: 'phase_advance',
+        fromAgent: activeAgent,
+        content: `💬 Debate available: ${debatesAfterAgent.map(d => d.topic).join(', ')}`,
+      });
+      setSidebarTab('debates');
+      toast.info(`Debate unlocked: ${debatesAfterAgent[0].topic}`, {
+        description: 'Switch to the Debates tab to watch agents challenge each other.',
+      });
+    }
+
     if (currentAgentIdx < SQUAD_AGENTS.length - 1) {
       const nextAgent = SQUAD_AGENTS[currentAgentIdx + 1];
       setActiveAgent(nextAgent.id);
       setCurrentStep(currentAgentIdx + 1);
-      setSidebarTab('chat');
+      if (!debatesAfterAgent.length) setSidebarTab('chat');
 
       addActivity({
         type: 'phase_advance',
@@ -194,7 +208,6 @@ const Squad = () => {
         content: `Advancing from ${currentAgentDef.name} → ${nextAgent.name}`,
       });
 
-      // Auto-generate if not A1 (which is chat-first)
       if (currentAgentIdx >= 0) {
         autoGenerateDocument(activeIdea, nextAgent.id, currentAgentIdx + 1);
       }
@@ -266,7 +279,6 @@ const Squad = () => {
           setGenerating(false);
           setGeneratingAgent(undefined);
 
-          // Auto-populate chat with the generated content for review
           setAgentMessages(prev => ({
             ...prev,
             [agentId]: [
@@ -288,6 +300,15 @@ const Squad = () => {
     setDocuments(prev => prev.map(d => d.id === docId ? { ...d, content, status: 'reviewed' as const } : d));
     await supabase.from('idea_documents').update({ content, status: 'reviewed' }).eq('id', docId);
     toast.success('Document updated');
+  };
+
+  const handleDebateComplete = (debateId: string) => {
+    setCompletedDebates(prev => new Set([...prev, debateId]));
+    addActivity({
+      type: 'doc_complete',
+      fromAgent: 'debate',
+      content: `Debate "${DEBATE_PAIRS.find(d => d.id === debateId)?.topic}" concluded`,
+    });
   };
 
   const canAdvance = activeIdea && !generating && (agentMessages[activeAgent]?.length ?? 0) > 0;
@@ -339,8 +360,8 @@ const Squad = () => {
             </div>
             <h2 className="text-lg font-semibold text-foreground mb-2">Elite 9-Agent Launch Squad</h2>
             <p className="text-sm text-muted-foreground mb-6">
-              9 specialized agents take your idea from market validation through deployment.
-              Market Strategist → Visionary PM → Architect → UI → Frontend → Backend → Security → Growth → Ops.
+              9 specialized agents + adversarial debates. Each agent has red lines they won't cross.
+              Structured debates at key transitions, open forum at the end.
             </p>
             <Button onClick={() => setShowNewDialog(true)} className="gap-2">
               <Plus className="w-4 h-4" /> New Idea
@@ -349,7 +370,7 @@ const Squad = () => {
         </div>
       ) : (
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Full-width Pipeline Flow */}
+          {/* Full-width Pipeline Flow with Debate Visualization */}
           <div className="flex-shrink-0 border-b border-border/40">
             <button
               onClick={() => setFlowExpanded(!flowExpanded)}
@@ -357,12 +378,17 @@ const Squad = () => {
             >
               <div className="flex items-center gap-2">
                 <Sparkles className="w-3 h-3 text-primary" />
-                Agent Pipeline — A1 → A9
+                Agent Pipeline & Debates — A1 → A9
+                {completedDebates.size > 0 && (
+                  <span className="text-[9px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
+                    {completedDebates.size} debates
+                  </span>
+                )}
               </div>
               {flowExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
             {flowExpanded && (
-              <div className="px-5 pb-3 bg-card/20">
+              <div className="px-5 pb-3 bg-card/20 space-y-2">
                 <SquadPipelineFlow
                   currentStep={currentStep}
                   activeAgent={activeAgent}
@@ -373,13 +399,21 @@ const Squad = () => {
                   completedAgents={completedAgents}
                   generatingAgent={generatingAgent}
                 />
+                <DebateFlowVisualization
+                  completedAgents={completedAgents}
+                  completedDebates={completedDebates}
+                  debateRedLines={debateRedLines}
+                  onDebateClick={(debateId) => {
+                    setSidebarTab('debates');
+                  }}
+                />
               </div>
             )}
           </div>
 
           {/* Main content */}
           <div className="flex-1 flex overflow-hidden">
-            {/* Sidebar */}
+            {/* Sidebar with 3 tabs */}
             <div className="w-[420px] flex-shrink-0 border-r border-border/40 flex flex-col bg-card/20">
               <div className="flex border-b border-border/40 flex-shrink-0">
                 <button
@@ -391,7 +425,7 @@ const Squad = () => {
                   }`}
                 >
                   <MessageSquare className="w-3.5 h-3.5" />
-                  {SQUAD_AGENTS.find(a => a.id === activeAgent)?.name || 'Chat'}
+                  Chat
                 </button>
                 <button
                   onClick={() => setSidebarTab('docs')}
@@ -409,6 +443,22 @@ const Squad = () => {
                     </span>
                   )}
                 </button>
+                <button
+                  onClick={() => setSidebarTab('debates')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors ${
+                    sidebarTab === 'debates'
+                      ? 'text-primary border-b-2 border-primary bg-primary/5'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  Debates
+                  {completedDebates.size > 0 && (
+                    <span className="ml-1 text-[9px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
+                      {completedDebates.size}
+                    </span>
+                  )}
+                </button>
               </div>
 
               <div className="flex-1 overflow-hidden">
@@ -421,7 +471,7 @@ const Squad = () => {
                     onMessagesChange={(msgs) => handleMessagesChange(activeAgent, msgs)}
                     onReadyToAdvance={() => toast.info('Agent is ready to advance. Click "Next Agent" to proceed.')}
                   />
-                ) : (
+                ) : sidebarTab === 'docs' ? (
                   <DocumentPanel
                     documents={documents}
                     activePhase={activeAgent}
@@ -429,6 +479,18 @@ const Squad = () => {
                     onDocumentClick={(docId) => {
                       setCenterView({ type: 'document', id: docId });
                     }}
+                  />
+                ) : (
+                  <DebateCanvas
+                    ideaId={activeIdea.id}
+                    userId={user!.id}
+                    completedAgents={completedAgents}
+                    documents={documents.filter(d => d.status === 'complete' || d.status === 'reviewed').map(d => ({
+                      agent: d.agent,
+                      title: d.title,
+                      content: d.content,
+                    }))}
+                    onDebateComplete={handleDebateComplete}
                   />
                 )}
               </div>
